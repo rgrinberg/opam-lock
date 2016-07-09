@@ -1,0 +1,350 @@
+#!/usr/bin/env ocaml
+
+#load "str.cma";;
+#load "unix.cma";;
+
+open Printf
+
+type err =
+  | Invalid_package of string
+  | Invalid_lock_line of string
+  | Invalid_git_hash of string
+  | Process_error of string * Unix.process_status
+
+exception Reqs_error of err
+
+let e e = raise (Reqs_error e)
+
+let space = Str.regexp "[ \t]+"
+let eq_char = Str.regexp "[ \t]*=[ \t]*"
+let uncomment =
+  let re = Str.regexp "[ \t]*#[ \t]*" in
+  fun s ->
+    String.trim (
+      match Str.bounded_split re s 2 with
+      | [ line ; _ ] -> line
+      | [ line ] -> line
+      | _ -> assert false
+    )
+
+module Misc = struct
+  let split_on s ~on =
+    try
+      let i = String.index s on in
+      Some ( String.sub s 0 i
+           , String.sub s i (String.length s - i - 1))
+    with Not_found -> None
+
+  let is_prefix s ~prefix =
+    if String.length prefix > String.length s
+    then false
+    else
+      try
+        for i = 0 to String.length prefix - 1 do
+          if s.[i] <> prefix.[i] then raise Exit
+        done;
+        true
+      with Exit -> false
+end
+
+module Version = struct
+  type t =
+    | Git_branch of string
+    | Version of string
+
+  let to_string = function
+    | Version s
+    | Git_branch s -> s
+
+  let of_string =
+    let https = Str.regexp "^https://" in
+    let git = Str.regexp {|^git\+|} in
+    fun s ->
+      let m re = Str.string_partial_match re s 0 in
+      if m https then Git_branch ("git+" ^ s)
+      else if m git then Git_branch s
+      else Version s
+
+  let pp fmt t = Format.pp_print_string fmt (to_string t)
+end
+
+module Pkg = struct
+  type t =
+    { name: string
+    ; version: Version.t }
+
+  let of_opam_line s =
+    match Str.split space s with
+    | name :: v :: _ ->
+      { name ; version = Version.Version v }
+    | _ -> e (Invalid_package s)
+
+  let to_opam_install t = sprintf "%s.%s" t.name (Version.to_string t.version)
+
+  let pp_lock fmt { name ; version } =
+    Format.fprintf fmt "%s = %a" name Version.pp version
+
+  let of_lock_line s =
+    match Str.split eq_char s with
+    | [ name; v ] ->
+      { name ; version = Version.of_string v}
+    | _ -> e (Invalid_lock_line s)
+end
+
+(* Heavily inspired by opam's Job process *)
+module Job : sig
+  type 'a t
+  val return : 'a -> 'a t
+  val cmd : string list -> string list t
+  val map : ('a -> 'b) -> 'a t -> 'b t
+  val (>>=) : 'a t -> ('a -> 'b t) -> 'b t
+
+  val run : 'a t -> 'a
+  val ignore : 'a t -> unit t
+  val seq' : unit t list -> unit t
+  val seq : 'a t list -> 'a list t
+end = struct
+  type 'a t =
+    | Return of 'a
+    | Cmd of string list * (string list -> 'a t)
+
+  let return a = Return a
+  let cmd s = Cmd (s, fun lines -> Return lines)
+
+  let rec map f = function
+    | Return a -> Return (f a)
+    | Cmd (args, f') -> Cmd (args, fun lines -> map f (f' lines))
+
+  let rec (>>=) t f =
+    match t with
+    | Return a -> f a
+    | Cmd (args, k) ->
+      Cmd (args, fun r -> (k r) >>= f)
+
+  let exec cmd =
+    let chan = Unix.open_process_in cmd in
+    let res = ref [] in
+    let rec loop acc =
+      let e = input_line chan in
+      res := e :: !res;
+      loop () in
+    try loop ()
+    with End_of_file ->
+      let stat = Unix.close_process_in chan in
+      (List.rev !res, stat)
+
+  let exec_exn cmd =
+    let (res, status) = exec cmd in
+    match status with
+    | Unix.WEXITED 0 -> res
+    | p -> e (Process_error (cmd, p))
+
+  let debug =
+    try ignore (Sys.getenv "OPAM_REQS_DEBUG"); true
+    with Not_found -> false
+
+  let rec run = function
+    | Return a -> a
+    | Cmd (args, k) ->
+      let args = String.concat " " args in
+      if debug then eprintf "Run: %s\n%!" args;
+      let lines = exec_exn args in
+      if debug then eprintf "-->%s\n%!" (String.concat "\n" lines);
+      run (k lines)
+
+  let ignore t = map ignore t
+
+  let rec seq' = function
+    | [] -> Return ()
+    | x::xs -> x >>= fun () -> seq' xs
+
+  let rec seq = function
+    | [] -> Return []
+    | x::xs ->
+      x >>= fun x ->
+      seq xs >>= fun xs ->
+      return (x::xs)
+end
+
+module Opam = struct
+  type request =
+    | Lock_all
+    | Lock_pkg of string
+
+  type state =
+    { pins: Pkg.t list
+    ; installs: Pkg.t list }
+
+  let pp_state fmt { pins ; installs } =
+    (pins @ installs)
+    |> List.iter (fun pkg -> Format.fprintf fmt "%a@." Pkg.pp_lock pkg)
+
+  let verbose = ref false
+
+  let opam args =
+    if !verbose then (
+      let pp_args = Format.pp_print_list ~pp_sep:Format.pp_print_space
+          Format.pp_print_string in
+      Format.eprintf "opam %a@." pp_args args
+    );
+    Job.cmd ("opam" :: args @ ["--color=never"])
+
+  let installs req =
+    let job =
+      match req with
+      | Lock_all -> opam ["list" ; "-i"]
+      | Lock_pkg pkg ->
+        opam [ "list" ; "-i" ; "--recursive" ; "--required-by" ; pkg ] in
+    job
+    |> Job.map (function [] -> [] | _::xs -> xs)
+    |> Job.map (List.map Pkg.of_opam_line)
+    |> Job.map (List.filter (fun { Pkg.version ; _ } ->
+        version <> Version.Version "base"))
+
+  let pins =
+    opam ["pin"]
+    |> Job.map (fun lines ->
+        let res = ref [] in
+        List.iter (fun l ->
+            match Str.split space l with
+            | [name ; "git" ; url] ->
+              let name = Scanf.sscanf name "%s@.%s@!" (fun name _v -> name) in
+              res := { Pkg.name ; version=Version.Git_branch url } :: !res
+            | _ -> eprintf "Ignoring: '%s'\n%!" l
+          ) lines;
+        List.rev !res)
+
+  let split ~installs ~pins =
+    List.partition (fun i ->
+        List.exists (fun p -> p.Pkg.name = i.Pkg.name) pins
+      ) installs
+
+  let git_hash pkg =
+    opam [ "show" ; "-f" ; "pinned" ; pkg.Pkg.name ]
+    |> Job.map (function
+        | [l] ->
+          Scanf.ksscanf l
+            (fun _in _exn -> e (Invalid_git_hash l))
+            "git (%s@)"
+            (fun s -> s)
+        | l -> e (Invalid_git_hash (String.concat "\n" l)))
+
+  let state req =
+    let open Job in
+    installs req >>= fun installs ->
+    pins >>= fun pins ->
+    let (find_git_hash, installs) = split ~installs ~pins in
+    let pins =
+      find_git_hash
+      |> List.map git_hash
+      |> Job.seq
+      |> Job.map (fun hashes ->
+          List.combine find_git_hash hashes
+          |> List.map (fun (pkg, hash) ->
+              let pin = List.find (fun p -> p.Pkg.name = pkg.Pkg.name) pins in
+              let git_url =
+                match pin.Pkg.version with
+                | Version.Version _ -> assert false
+                | Version.Git_branch str ->
+                  Scanf.sscanf str "%s@#%s" (fun u br ->
+                      let commit =
+                        if Misc.is_prefix br ~prefix:hash
+                        then br
+                        else hash in
+                      sprintf "%s#%s" u commit) in
+              { pkg with Pkg.version = Version.Git_branch git_url })
+        ) in
+    pins >>= fun pins ->
+    Job.return { pins ; installs }
+
+  let install { pins ; installs } =
+    let open Job in
+    pins
+    |> List.map (fun pin ->
+        [ "pin" ; "add" ; "-y" ; "-n" ; "-k"
+        ; "git" ; pin.Pkg.name
+        ; Version.to_string pin.Pkg.version ]
+        |> opam
+        |> Job.ignore)
+    |> Job.seq'
+    >>= fun () ->
+    opam (["install"; "-y"] @ (List.map Pkg.to_opam_install installs))
+    |> Job.ignore
+end
+
+let rec read_no_comment_lines acc =
+  try
+    let line =
+      let line = input_line stdin in
+      String.trim (
+        match Misc.split_on line ~on:'#' with
+        | None -> line
+        | Some (l, _) -> l
+      ) in
+    if line = ""
+    then read_no_comment_lines acc
+    else read_no_comment_lines (line :: acc)
+  with End_of_file -> List.rev acc
+
+let state_of_input lines =
+  let (pins, installs) =
+    lines
+    |> List.map Pkg.of_lock_line
+    |> List.partition (fun { Pkg.version } ->
+        match version with
+        | Version.Git_branch _ -> true
+        | Version.Version _ -> false
+      ) in
+  { Opam.pins ; installs }
+
+type action =
+  | Lock_all
+  | Lock_pkg of string
+  | Install
+
+let run : action -> unit = function
+  | Install ->
+    let lines = read_no_comment_lines [] in
+    let state = state_of_input lines in
+    Job.run (Opam.install state)
+  | req ->
+    let req =
+      match req with
+      | Lock_all -> Opam.Lock_all
+      | Lock_pkg s -> Opam.Lock_pkg s
+      | _ -> assert false in
+    req
+    |> Opam.state
+    |> Job.run
+    |> Opam.pp_state Format.std_formatter;
+    Format.pp_print_flush Format.std_formatter ()
+
+let () =
+  let pkg = ref None in
+  let all = ref false in
+  let install = ref false in
+  let verbose = ref false in
+  let usage =
+    "invoke = opam lock command [-v]\n\
+     command = -pkg <pkg> | -all | -install\n\
+     -v : print opam command being executed
+     -all : dumps the state of the switch to stdout\n\
+     -pkg <pkg> : dumps (recursive) dependencies of <pkg> to stdout\n\
+     -install : installs all packages in the lock format from stdin"
+  in
+  Arg.parse
+    [ "-pkg", Arg.String (fun s -> pkg := Some s),
+      "lock a package + its dependencies"
+    ; "-all", Arg.Set all,
+      "lock all packages in a switch"
+    ; "-install", Arg.Set install,
+      "install packages from stdin lock"
+    ; "-v", Arg.Set verbose, "print opam commands" ]
+    (fun e -> raise (Arg.Bad ("bad argument: " ^ e)))
+    usage;
+  Opam.verbose := !verbose;
+  match !pkg, !all, !install with
+  | Some pkg, false, false -> run (Lock_pkg pkg)
+  | None, true, false -> run Lock_all
+  | None, false, true -> run Install
+  | _, _, _ -> prerr_endline usage

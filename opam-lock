@@ -331,18 +331,18 @@ let () =
   let verbose = ref false in
   let usage =
     "invoke = opam lock command [-v]\n\
-     command = -pkg <pkg> | -all | -install\n\
+     command = --pkg <pkg> | --all | --install\n\
      -v : print opam command being executed
-     -all : dumps the state of the switch to stdout\n\
-     -pkg <pkg> : dumps (recursive) dependencies of <pkg> to stdout\n\
-     -install : installs all packages in the lock format from stdin"
+     --all : dumps the state of the switch to stdout\n\
+     --pkg <pkg> : dumps (recursive) dependencies of <pkg> to stdout\n\
+     --install : installs all packages in the lock format from stdin"
   in
   Arg.parse
-    [ "-pkg", Arg.String (fun s -> pkg := Some s),
+    [ "--pkg", Arg.String (fun s -> pkg := Some s),
       "lock a package + its dependencies"
-    ; "-all", Arg.Set all,
+    ; "--all", Arg.Set all,
       "lock all packages in a switch"
-    ; "-install", Arg.Set install,
+    ; "--install", Arg.Set install,
       "install packages from stdin lock"
     ; "-v", Arg.Set verbose, "print opam commands" ]
     (fun e -> raise (Arg.Bad ("bad argument: " ^ e)))

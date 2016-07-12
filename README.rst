@@ -19,12 +19,12 @@ Usage
 
 Create a lock file with the full state of a switch::
 
-    $ opam lock -all > opam.lock
+    $ opam lock --all > opam.lock
 
 Create a lock file for the dependencies (transitive too) of a particular
 package::
 
-    $ opam lock -pkg cohttp > cohttp.lock
+    $ opam lock --pkg cohttp > cohttp.lock
 
 On one of my switches, this yields the following lock file::
 
@@ -56,7 +56,7 @@ On one of my switches, this yields the following lock file::
 
 Install a set of packages from a lock::
 
-    $ opam lock -install < cohttp.lock
+    $ opam lock --install < cohttp.lock
 
 Limitations
 -----------

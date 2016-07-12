@@ -79,7 +79,12 @@ module Pkg = struct
       { name ; version = Version.Version v }
     | _ -> e (Invalid_package s)
 
-  let to_opam_install t = sprintf "%s.%s" t.name (Version.to_string t.version)
+  let to_opam_install t =
+    let version =
+      match t.version with
+      | Version.Version v -> "." ^ v
+      | Version.Git_branch _ -> "" in
+    sprintf "%s%s" t.name version
 
   let pp_lock fmt { name ; version } =
     Format.fprintf fmt "%s = %a" name Version.pp version
@@ -268,7 +273,7 @@ module Opam = struct
         |> Job.ignore)
     |> Job.seq'
     >>= fun () ->
-    opam (["install"; "-y"] @ (List.map Pkg.to_opam_install installs))
+    opam (["install"; "-y"] @ (List.map Pkg.to_opam_install (pins @ installs)))
     |> Job.ignore
 end
 

@@ -3,9 +3,9 @@ name: "lock"
 version: "1.2"
 maintainer: "Rudi Grinberg <rudi.grinberg@gmail.com>"
 authors: "Rudi Grinberg <rudi.grinberg@gmail.com>"
-homepage: "https://gitlock.com/rgrinberg/opam-lock"
-bug-reports: "https://gitlock.com/rgrinberg/opam-lock/issues"
-dev-repo: "git://gitlock.com/rgrinberg/opam-lock"
+homepage: "https://github.com/rgrinberg/opam-lock"
+bug-reports: "https://github.com/rgrinberg/opam-lock/issues"
+dev-repo: "https://github.com/rgrinberg/opam-lock.git"
 license: "MIT"
 build: [ ]
 depends: [ ]

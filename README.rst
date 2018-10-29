@@ -1,3 +1,12 @@
+This project is deprecated
+==========================
+
+This project was an interesting experiment but it should no longer be used. For a direct and far better alternative, use:
+https://github.com/AltGr/opam-lock
+
+For a more thorough solution to all your sandboxing and dependency needs, consider using https://github.com/esy/esy/
+
+
 opam-lock
 =========
 
